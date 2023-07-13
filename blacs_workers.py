@@ -31,44 +31,9 @@ absolute_path_to_dlls = ""
 operation_mode_dict = {'SOFTWARE_TRIGGERED':0,'HARDWARE_TRIGGERED':1,'BULB':2}
 
 class Thorlab_Camera(object):
-    """The backend hardware interface class for the ThorCam.
     
-    This class handles all of the API/hardware implementation details for the
-    corresponding labscript device. It is used by the BLACS worker to send
-    appropriate API commands to the camera for the standard BLACS camera operations
-    (i.e. transition_to_buffered, get_attributes, snap, etc).
-    
-    Attributes:
-        camera (PyCapture2.Camera): Handle to connected camera.
-        get_props (list): This list sets which values of each property object 
-            are returned when queried by :obj:`get_attribute`.
-        pixel_formats (IntEnum): An IntEnum object that is automatically 
-            populated with the supported pixel types of the connected camera.
-        width (int): Width of images for most recent acquisition. 
-            Used by :obj:`_decode_image_data` to format images correctly.
-        height (int): Height of images for most recent acquisition.
-            Used by :obj:`_decode_image_data` to format images correctly.
-        pixelFormat (str): Pixel format name for most recent acquisition.
-            Used by :obj:`_decode_image_data` to format images correctly.
-        _abort_acquisition (bool): Abort flag that is polled during buffered
-            acquisitions.
-    """
     def __init__(self, serial_number):
-        """Initialize FlyCapture2 API camera.
-        
-        Searches all cameras reachable by the host using the provided serial
-        number. Fails with API error if camera not found.
-        
-        This function also does a significant amount of default configuration.
-        
-        * It defaults the grab timeout to 1 s
-        * Ensures use of the API's HighPerformanceRetrieveBuffer
-        * Ensures the camera is in Format 7, Mode 0 with full frame readout and MONO8 pixels
-        * If using a GigE camera, automatically maximizes the packet size and warns if Jumbo packets are not enabled on the NIC
-        
-        Args:
-            serial_number (int): serial number of camera to connect to
-        """
+       
         os.environ['PATH']=r'C:\Windows\System32'+os.pathsep+os.environ['PATH']
         # Python 3.8 introduces a new method to specify dll directory
         os.add_dll_directory(r'C:\Windows\System32')
@@ -89,9 +54,12 @@ class Thorlab_Camera(object):
         
         if self.camera.is_armed:
             self.camera.disarm()
+            self.is_armed=False
 
         self._abort_acquisition = False
         self.exception_on_failed_shot = True
+        self.software=True
+        self.is_armed=False
 
     def get_attributes(self):
         self.props['OperationMode'] = self.camera.operation_mode
@@ -117,10 +85,12 @@ class Thorlab_Camera(object):
         """
         if self.camera.is_armed:
             self.camera.disarm()
+            self.is_armed=False
         for prop, vals in attr_dict.items():
                 
             if prop == 'OperationMode':
                 self.set_operation_mode(vals)
+                self.trigger_mode = vals
             elif prop == 'Gain':
                 self.set_gain(vals)
             elif prop == 'ExposureTime':
@@ -198,7 +168,10 @@ class Thorlab_Camera(object):
         """
         if self.camera.is_armed:
             self.camera.disarm()
+            self.is_armed=False
+        self.set_operation_mode('SOFTWARE_TRIGGERED')
         self.configure_acquisition(continuous=False,bufferCount=1)
+        self.software = True
         image = self.grab()
         self.stop_acquisition()
         return image
@@ -223,8 +196,7 @@ class Thorlab_Camera(object):
         else:
             self.camera.frames_per_trigger_zero_for_unlimited = 1
             
-        self.set_operation_mode('SOFTWARE_TRIGGERED')
-        self.camera.arm(2)
+
             
     def grab(self):
         """Grab and return single image during pre-configured acquisition.
@@ -232,13 +204,15 @@ class Thorlab_Camera(object):
         Returns:
             numpy.array: Returns formatted image
         """
-        
-        self.camera.issue_software_trigger()
+        if not self.is_armed:
+            self.camera.arm(50) # Buffer size on the camera in number of images; buffer size should be no smaller than the number of images in a single shot
+            self.is_armed = True
+        if self.software:
+            self.camera.issue_software_trigger()
         img =None
         while not img:
             img = self.camera.get_pending_frame_or_null()
 
-        print(img.image_buffer)
         #result.ReleaseBuffer(), exists in documentation, not PyCapture2
         return img.image_buffer
 
@@ -253,6 +227,16 @@ class Thorlab_Camera(object):
                 as the bufferCount in :obj:`configure_acquisition`.
             images (list): List that images will be saved to as they are acquired
         """
+        img = 1
+        while img:
+            img = self.camera.get_pending_frame_or_null()
+        self.software = False
+        if self.camera.is_armed:
+            self.camera.disarm()
+            self.is_armed=False
+        self.set_operation_mode(self.trigger_mode)
+        self.camera.arm(50) # Buffer size on the camera in number of images; buffer size should be no smaller than the number of images in a single shot
+        self.is_armed = True
         print(f"Attempting to grab {n_images} images.")
         for i in range(n_images):
             while True:
@@ -268,11 +252,12 @@ class Thorlab_Camera(object):
                     print('.', end='')
                     continue
         print(f"Got {len(images)} of {n_images} images.")
-
+        self.software = True
 
     def stop_acquisition(self):
         """Tells camera to stop current acquistion."""
         self.camera.disarm()
+        self.is_armed=False
 
     def abort_acquisition(self):
         """Sets :obj:`_abort_acquisition` flag to break buffered acquisition loop."""
